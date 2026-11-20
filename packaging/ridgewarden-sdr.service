@@ -1,0 +1,24 @@
+[Unit]
+Description=ridgewarden-sdr, SDR directory and interference hunting for AREDN meshes
+Documentation=https://github.com/Londopy/ridgewarden-sdr
+After=network-online.target ridgewarden.service
+Wants=network-online.target
+
+[Service]
+# its own user, in the core's group: it can read the core's local.token, not its station key
+User=ridgewarden-sdr
+Group=ridgewarden-sdr
+SupplementaryGroups=ridgewarden plugdev
+# rtl-sdr's udev rules give the plugdev group access to the dongles
+ExecStart=/usr/bin/ridgewarden-sdr --config /etc/ridgewarden/sdr.toml run
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# IQ snippets go to the core as blobs through its import and export folders
+ReadWritePaths=/var/lib/ridgewarden-sdr /var/lib/ridgewarden/imports /var/lib/ridgewarden/exports
+
+[Install]
+WantedBy=multi-user.target
