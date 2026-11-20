@@ -23,11 +23,11 @@ jobs:
     steps:
       # this app builds against the core's shared client crate as a sibling checkout
       # (Cargo.toml uses path = "../ridgewarden/..."), so lay the two repos out side by side
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: ridgewarden-sdr
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Londopy/ridgewarden
           path: ridgewarden
@@ -63,11 +63,11 @@ jobs:
     steps:
       # this app builds against the core's shared client crate as a sibling checkout
       # (Cargo.toml uses path = "../ridgewarden/..."), so lay the two repos out side by side
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: ridgewarden-sdr
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Londopy/ridgewarden
           path: ridgewarden
