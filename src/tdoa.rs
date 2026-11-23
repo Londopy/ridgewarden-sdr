@@ -12,6 +12,8 @@
 //! a plain carrier or a carrier with only a CTCSS tone has nothing to time, and the page
 //! says so rather than show a fix built on noise.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -70,6 +72,59 @@ pub struct Pair {
     pub psr_ref: f64,
 }
 
+impl Pair {
+    /// The path difference a transmitter at `tx` gives this pair, km: what it should have
+    /// measured.
+    pub fn expected_km(&self, tx: LatLon) -> f64 {
+        distance_km(tx, self.b.pos()) - distance_km(tx, self.a.pos())
+    }
+
+    fn valid(&self) -> bool {
+        valid_end(&self.a)
+            && valid_end(&self.b)
+            && self.dd_km.is_finite()
+            && self.dd_km.abs() <= distance_km(self.a.pos(), self.b.pos()) + 5.0
+            && self.sigma_km.is_finite()
+            && self.sigma_km > 0.0
+            && self.sigma_km <= 100.0
+            && self.psr_target.is_finite()
+            && self.psr_ref.is_finite()
+    }
+}
+
+/// Pairs read from the feed: malformed ones are dropped, and a long list is cut short
+/// rather than refused.
+pub fn trim_pairs(pairs: &mut Vec<Pair>) {
+    pairs.retain(Pair::valid);
+    pairs.truncate(MAX_PAIRS);
+}
+
+/// The pairs that stand for a capture: both ends are snippets really published for it,
+/// from where they were published, each two receivers count once, and there are no more
+/// pairs than the snippets give independently, one fewer than there are snippets.
+pub fn matched(pairs: &mut Vec<Pair>, notes: &[(String, SnippetNote)]) {
+    let known = |e: &End| {
+        notes.iter().any(|(k, n)| {
+            *k == e.key
+                && n.receiver == e.receiver
+                && n.node == e.node
+                && n.lat == e.lat
+                && n.lon == e.lon
+        })
+    };
+    let id = |e: &End| (e.key.clone(), e.receiver.clone());
+    let mut seen = HashSet::new();
+    pairs.retain(|p| {
+        let (a, b) = (id(&p.a), id(&p.b));
+        known(&p.a) && known(&p.b) && a != b && seen.insert(if a < b { (a, b) } else { (b, a) })
+    });
+    pairs.truncate(notes.len().saturating_sub(1));
+    for p in pairs.iter_mut() {
+        // no pair times a burst to better than a meter; a smaller claim would swamp any ratio
+        p.sigma_km = p.sigma_km.max(1e-3);
+    }
+}
+
 /// The time difference between two sites' snippets, or why there is none.
 pub fn pair(
     (a, a_pos): (&Snippet, LatLon),
@@ -98,10 +153,12 @@ pub fn pair(
     let (band_r, band_t) = (band(a.header.ref_bw), band(a.header.target_bw));
     let whole = gcc_window(&ra, &rb, 0, len, skew, w, band_r).filter(|p| p.psr >= PSR_MIN);
     let Some(whole) = whole else {
-        return Err(
-            "the reference transmitter isn't clear enough at both sites to line their clocks up"
-                .into(),
-        );
+        let ms = o.max_skew_s * 1000.0;
+        return Err(format!(
+            "no clear peak for the reference transmitter within {ms:.0} ms of where the two \
+             sites' clocks put it: the reference isn't clear enough at one of them, or one \
+             site's clock is more than {ms:.0} ms off (is NTP running there?)"
+        ));
     };
     let parts: Vec<(usize, usize, Peak)> = (0..PARTS)
         .filter_map(|i| {
@@ -166,7 +223,8 @@ pub fn pair(
 
 fn multipath(dd_km: f64, apart_km: f64) -> String {
     format!(
-        "the best match for the target means a path difference of {dd_km:.1} km, more than the          {apart_km:.1} km between the sites allows: multipath, or two transmitters on the frequency"
+        "the best match for the target means a path difference of {dd_km:.1} km, more than the \
+         {apart_km:.1} km between the sites allows: multipath, or two transmitters on the frequency"
     )
 }
 
@@ -291,18 +349,7 @@ impl Solution {
         }
         r.problems.retain(|p| clean(p, 600));
         r.problems.truncate(MAX_PAIRS);
-        r.pairs.retain(|p| {
-            valid_end(&p.a)
-                && valid_end(&p.b)
-                && p.dd_km.is_finite()
-                && p.dd_km.abs() <= distance_km(p.a.pos(), p.b.pos()) + 5.0
-                && p.sigma_km.is_finite()
-                && p.sigma_km > 0.0
-                && p.sigma_km <= 100.0
-                && p.psr_target.is_finite()
-                && p.psr_ref.is_finite()
-        });
-        r.pairs.truncate(MAX_PAIRS);
+        trim_pairs(&mut r.pairs);
         Some(r)
     }
 }
@@ -413,23 +460,13 @@ pub fn result(conn: &Connection, capture: &str) -> Result<Option<(String, Soluti
     let rows: Vec<(String, String)> = st
         .query_map([capture], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
-    // only pairs between snippets that were really published, from where they were published
     let notes = snippets(conn, capture)?;
-    let known = |e: &End| {
-        notes.iter().any(|(k, n)| {
-            *k == e.key
-                && n.receiver == e.receiver
-                && n.node == e.node
-                && n.lat == e.lat
-                && n.lon == e.lon
-        })
-    };
     let mut best: Option<(String, Solution)> = None;
     for (call, json) in rows {
         let Ok(mut sol) = serde_json::from_str::<Solution>(&json) else {
             continue;
         };
-        sol.pairs.retain(|p| known(&p.a) && known(&p.b));
+        matched(&mut sol.pairs, &notes);
         sol.snippets = sol.snippets.min(notes.len());
         // newest first, so among equals the latest stands
         if best
@@ -734,5 +771,53 @@ pub mod tests {
         let (call, sol) = result(&c, &id).unwrap().unwrap();
         assert_eq!(call, "N0S1");
         assert_eq!(sol.pairs.len(), 1);
+    }
+
+    #[test]
+    fn each_two_receivers_count_once_and_no_more_than_the_snippets_give() {
+        let note = |rx: &str, lat: f64| {
+            let n = serde_json::json!({"capture": "c".repeat(64), "receiver": rx, "node": "tst-a",
+                "lat": lat, "lon": -120.0, "root": "d".repeat(64), "clipped": 0.0});
+            (
+                "k".to_string(),
+                serde_json::from_value::<SnippetNote>(n).unwrap(),
+            )
+        };
+        let notes = [note("rx1", 35.0), note("rx2", 35.1), note("rx3", 35.2)];
+        let end = |rx: &str, lat: f64| End {
+            key: "k".into(),
+            receiver: rx.into(),
+            node: "tst-a".into(),
+            lat,
+            lon: -120.0,
+        };
+        let (r1, r2, r3) = (end("rx1", 35.0), end("rx2", 35.1), end("rx3", 35.2));
+        let pair = |a: &End, b: &End, sigma_km: f64| Pair {
+            a: a.clone(),
+            b: b.clone(),
+            dd_km: 1.0,
+            sigma_km,
+            psr_target: 12.0,
+            psr_ref: 20.0,
+        };
+        let mut pairs = vec![
+            pair(&r1, &r2, 0.5),
+            // the same two receivers the other way round, and one against itself
+            pair(&r2, &r1, 0.5),
+            pair(&r1, &r1, 0.5),
+            pair(&r1, &r3, 1e-9),
+            // three snippets give two independent pairs, not three
+            pair(&r2, &r3, 0.5),
+        ];
+        matched(&mut pairs, &notes);
+        let ends: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|p| (p.a.receiver.as_str(), p.b.receiver.as_str()))
+            .collect();
+        assert_eq!(ends, [("rx1", "rx2"), ("rx1", "rx3")]);
+        assert_eq!(
+            pairs[1].sigma_km, 1e-3,
+            "a claimed micrometer is taken as a meter"
+        );
     }
 }

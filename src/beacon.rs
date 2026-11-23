@@ -17,6 +17,7 @@ use crate::config::{BeaconCfg, Config};
 use crate::directory::{clean, valid_pos};
 use crate::geo::{LatLon, distance_km};
 use crate::locate;
+use crate::tdoa::{self, Pair, trim_pairs};
 
 const DAY: i64 = 86_400_000;
 /// The request goes out this long before the test, so every site has it in time.
@@ -62,11 +63,15 @@ pub struct Outcome {
     /// why there was no fix
     #[serde(default)]
     pub problem: Option<String>,
+    /// the test's time differences, to set against the delays the surveyed spot gives
+    #[serde(default)]
+    pub pairs: Vec<Pair>,
 }
 
 impl Outcome {
     pub fn from_payload(v: &Value) -> Option<Self> {
-        let o: Outcome = serde_json::from_value(v.clone()).ok()?;
+        let mut o: Outcome = serde_json::from_value(v.clone()).ok()?;
+        trim_pairs(&mut o.pairs);
         let num = |x: Option<f64>| x.is_none_or(|v| v.is_finite() && (0.0..20_000.0).contains(&v));
         let ok = o.capture.len() == 64
             && clean(&o.name, 40)
@@ -104,11 +109,13 @@ impl Projection for Beacons {
         Ok(())
     }
 
-    fn apply(&self, tx: &Transaction, e: &Event, _ts: i64) -> Result<()> {
+    fn apply(&self, tx: &Transaction, e: &Event, ts: i64) -> Result<()> {
         if e.kind != "sdr.beacon" {
             return Ok(());
         }
-        if let Some(o) = Outcome::from_payload(&e.payload) {
+        if let Some(mut o) = Outcome::from_payload(&e.payload) {
+            // the test ran before its result reached this site, whatever its author's clock says
+            o.at = o.at.min(ts);
             tx.execute(
                 "INSERT OR IGNORE INTO beacon_results (capture, author_key, call, at, json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -126,7 +133,8 @@ impl Projection for Beacons {
 }
 
 /// The latest thousand test results, oldest first, with who published them. Only results
-/// for a beacon capture, published by the station that asked for it, count.
+/// for a beacon capture, published by the station that asked for it, count, and of their
+/// time differences only those between snippets really published for the capture.
 pub fn history(conn: &Connection) -> Result<Vec<(String, Outcome)>> {
     let mut st = conn.prepare(
         "SELECT * FROM (SELECT b.call, b.json, b.at FROM beacon_results b
@@ -137,10 +145,17 @@ pub fn history(conn: &Connection) -> Result<Vec<(String, Outcome)>> {
     let rows: Vec<(String, String)> = st
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(c, j)| Some((c, serde_json::from_str(&j).ok()?)))
-        .collect())
+    let mut out = vec![];
+    for (call, json) in rows {
+        let Ok(mut o) = serde_json::from_str::<Outcome>(&json) else {
+            continue;
+        };
+        if !o.pairs.is_empty() {
+            tdoa::matched(&mut o.pairs, &tdoa::snippets(conn, &o.capture)?);
+        }
+        out.push((call, o));
+    }
+    Ok(out)
 }
 
 /// Median miss of the latest four tests against the four before, km: (now, before).
@@ -171,6 +186,7 @@ pub fn outcome(conn: &Connection, cfg: &Config, cap: &Cap) -> Result<Option<Outc
         at: cap.req.at_ms(),
         spot_lat: spot.lat,
         spot_lon: spot.lon,
+        pairs: tdoa::result(conn, &cap.id)?.map_or_else(Vec::new, |(_, s)| s.pairs),
         ..Default::default()
     };
     match fix {
@@ -349,6 +365,69 @@ mod tests {
         assert!(o.major_km.unwrap() > 0.0);
         let back = Outcome::from_payload(&serde_json::to_value(&o).unwrap()).unwrap();
         assert_eq!(back, o);
+    }
+
+    #[test]
+    fn a_beacon_result_keeps_only_the_time_differences_it_measured() {
+        let mut c = init();
+        let config: Config = toml::from_str(EXAMPLE).unwrap();
+        let spot = LatLon::new(35.4, -120.6);
+        let req = json!({"freq": 144_285_000u64, "bw": 16_000u64, "secs": 10, "at": "2026-11-22T18:30:00Z",
+                         "beacon": {"name": "TST beacon", "lat": spot.lat, "lon": spot.lon},
+                         "reference": {"name": "TST digipeater", "freq": 144_390_000u64, "bw": 16_000u64,
+                                       "lat": 35.45, "lon": -120.55}});
+        let at = rfc3339_to_ms("2026-11-22T18:30:00Z").unwrap();
+        let id = ev(&mut c, "aa", "sdr.capture", req, at - 600_000).id;
+        let sites = [offset(spot, -12.0, -8.0), offset(spot, 11.0, -10.0)];
+        let end = |i: usize| {
+            json!({"key": format!("k{i}"), "receiver": "rx1", "node": format!("tst-{i}"),
+                   "lat": sites[i].lat, "lon": sites[i].lon})
+        };
+        for i in 0..2 {
+            let mut note = end(i);
+            note.as_object_mut().unwrap().remove("key");
+            note["capture"] = json!(id);
+            note["root"] = json!("d".repeat(64));
+            note["clipped"] = json!(0.0);
+            ev(&mut c, &format!("k{i}"), "sdr.snippet", note, at + 5000);
+        }
+        let pair = |dd_km: f64| {
+            json!({"a": end(0), "b": end(1), "dd_km": dd_km, "sigma_km": 0.9,
+                   "psr_target": 14.0, "psr_ref": 30.0})
+        };
+        let sol = json!({"capture": id, "snippets": 2, "pairs": [pair(3.2)]});
+        ev(&mut c, "solver", "sdr.tdoa", sol, at + 60_000);
+
+        let cap = capture::find(&c, &id).unwrap().unwrap();
+        let o = outcome(&c, &config, &cap).unwrap().unwrap();
+        assert_eq!(o.pairs.len(), 1);
+        assert_eq!(o.pairs[0].dd_km, 3.2);
+        let mut v = serde_json::to_value(&o).unwrap();
+        assert_eq!(Outcome::from_payload(&v).unwrap(), o);
+        // a path difference longer than the sites are apart can't have been measured
+        v["pairs"] = json!([pair(3.2), pair(80.0)]);
+        let back = Outcome::from_payload(&v).unwrap();
+        assert_eq!(
+            back.pairs.len(),
+            1,
+            "the impossible pair is dropped, the result kept"
+        );
+
+        // published dated a year ahead, led by a pair from a receiver that sent no snippet
+        let mut forged = pair(1.0);
+        forged["b"]["receiver"] = json!("rx9");
+        v["pairs"] = json!([forged, pair(3.2)]);
+        v["at"] = json!(at + 400 * DAY);
+        let arrived = at + RESULT_AFTER_MS;
+        ev(&mut c, "aa", "sdr.beacon", v, arrived);
+        let h = history(&c).unwrap();
+        assert_eq!(h.len(), 1);
+        let dd: Vec<f64> = h[0].1.pairs.iter().map(|p| p.dd_km).collect();
+        assert_eq!(dd, [3.2], "only pairs between published snippets count");
+        assert_eq!(
+            h[0].1.at, arrived,
+            "a test can't have run after its result arrived"
+        );
     }
 
     #[test]

@@ -2,12 +2,12 @@
 //! across them.
 //!
 //! Runs next to a ridgewarden core. Each site publishes its receivers as signed events
-//! (with only amateur-band OpenWebRX+ profiles offered over RF), and every site builds the
-//! same directory from the core's feed. A capture request makes every site measure one
-//! frequency at the same moment: signal strength from any SDR, bearings from KrakenSDRs,
-//! and time differences from IQ snippets aligned on a reference transmitter. The page
-//! combines whatever came back into one fix with an error ellipse, and a weekly test
-//! against a beacon at a surveyed spot publishes how far the fixes really miss.
+//! (linking only to OpenWebRX+ instances that serve amateur bands alone), and every site
+//! builds the same directory from the core's feed. A capture request makes every site
+//! measure one frequency at the same moment: signal strength from any SDR, bearings from
+//! KrakenSDRs, and time differences from IQ snippets aligned on a reference transmitter.
+//! The page combines whatever came back into one fix with an error ellipse, and a weekly
+//! test against a beacon at a surveyed spot publishes how far the fixes really miss.
 
 pub mod app;
 pub mod bands;
@@ -32,6 +32,7 @@ pub mod solver;
 pub mod tdoa;
 #[cfg(test)]
 pub mod testing;
+pub mod timing;
 pub mod web;
 
 use std::future::Future;

@@ -900,7 +900,7 @@ pub async fn accuracy_page(State(app): State<Arc<App>>) -> Result<Html<String>, 
         );
     }
     let from = h.first().map_or(0, |x| x.1.at);
-    let to = h.last().map_or(0, |x| x.1.at).max(from + 1);
+    let to = h.last().map_or(0, |x| x.1.at).max(from.saturating_add(1));
     let chart = Chart {
         from,
         to,
@@ -924,6 +924,10 @@ pub async fn accuracy_page(State(app): State<Arc<App>>) -> Result<Html<String>, 
         ..Default::default()
     };
     b.push_str(&chart.render("Beacon test miss distance"));
+    b.push_str(
+        "<p><a href=\"/accuracy/timing\">Timing</a>: each test's time differences, where the \
+         correlation peaked, against the delays the surveyed spot gives.</p>",
+    );
     b.push_str(
         "<div class=wrap><table><tr><th>When</th><th>Beacon</th><th>Miss</th><th>Ellipse</th>\
          <th>Inside</th><th>From</th><th>Published by</th></tr>",

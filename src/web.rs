@@ -19,6 +19,7 @@ use crate::directory::{self, Listed};
 use crate::hunt;
 use crate::map::{self, Pt};
 use crate::owrx;
+use crate::timing;
 
 /// A receiver not heard from in this long is shown as quiet.
 const QUIET_MS: i64 = 3_600_000;
@@ -33,6 +34,7 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/capture", get(hunt::capture_page))
         .route("/accuracy", get(hunt::accuracy_page))
+        .route("/accuracy/timing", get(timing::timing_page))
         .route("/bands", get(bands_page))
         .route("/api/receivers.geojson", get(receivers_geojson))
         .route("/api/capture", get(hunt::capture_json))
