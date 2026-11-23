@@ -2,6 +2,8 @@
 //! when its description changes (and daily), plus `sdr.status` telemetry with live status.
 //! Every site builds the same directory from the feed, so it works with the internet down.
 
+use std::path::Path;
+
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -371,36 +373,65 @@ pub fn position(
     }
 }
 
+/// What a running OpenWebRX+ instance said it serves, or why it couldn't be asked.
+pub type Served = Result<Vec<owrx::Profile>, String>;
+
+/// The web link and profiles to publish, and why the link is withheld.
+type Offer = (Option<String>, Vec<RfProfile>, Option<String>);
+
+fn withheld(why: String) -> Offer {
+    (None, vec![], Some(why.chars().take(300).collect()))
+}
+
+/// Why a profile the running instance serves can't go over RF: it is outside the amateur
+/// bands, or it isn't one of the profiles the settings check passed.
+fn unchecked(served: &[owrx::Profile], checked: &[owrx::Profile], path: &Path) -> Option<String> {
+    let p = served
+        .iter()
+        .find(|p| p.problem().is_some() || !checked.iter().any(|c| c.span() == p.span()))?;
+    Some(match p.problem() {
+        Some(why) => format!("the running instance serves profile {:?}: {why}", p.name),
+        None => format!(
+            "the running instance serves profile {:?}, which isn't in {}; is that its \
+             settings.json, and has it been restarted since the file changed?",
+            p.name,
+            path.display()
+        ),
+    })
+}
+
 /// The web link and profiles to publish for the mesh-facing OpenWebRX+ instance, or why
-/// the link is withheld.
-pub fn rf_offer(rx: &ReceiverCfg) -> (Option<String>, Vec<RfProfile>, Option<String>) {
+/// the link is withheld. Its settings file and what the running instance says it serves
+/// both have to pass.
+pub fn rf_offer(rx: &ReceiverCfg, served: &Served) -> Offer {
     let (Some(url), Some(path)) = (&rx.openwebrx_url, &rx.openwebrx_settings) else {
         return (None, vec![], None);
     };
     let checked = owrx::load(path).and_then(|s| Ok((owrx::profiles(&s)?, s)));
     let (profiles, settings) = match checked {
         Ok(x) => x,
-        Err(e) => {
-            let why = format!("its settings could not be checked: {e:#}");
-            return (None, vec![], Some(why.chars().take(300).collect()));
-        }
+        Err(e) => return withheld(format!("its settings could not be checked: {e:#}")),
     };
     if let Some((p, why)) = profiles.iter().find_map(|p| Some((p, p.problem()?))) {
-        let why = format!(
+        return withheld(format!(
             "profile {:?} {why}; run check-owrx --write to make an amateur-only copy",
             p.name
-        );
-        return (None, vec![], Some(why.chars().take(300).collect()));
+        ));
     }
     if owrx::center_changes_allowed(&settings) {
-        return (
-            None,
-            vec![],
-            Some(format!(
-                "{} is on, so listeners could tune off the band",
-                owrx::CENTER_CHANGES
-            )),
-        );
+        return withheld(format!(
+            "{} is on, so listeners could tune off the band",
+            owrx::CENTER_CHANGES
+        ));
+    }
+    let live = match served {
+        Ok(live) => unchecked(live, &profiles, path),
+        Err(e) => Some(format!(
+            "the running instance couldn't be asked what it serves: {e}"
+        )),
+    };
+    if let Some(why) = live {
+        return withheld(why);
     }
     let offered = profiles
         .iter()
@@ -417,9 +448,14 @@ pub fn rf_offer(rx: &ReceiverCfg) -> (Option<String>, Vec<RfProfile>, Option<Str
     (Some(url.clone()), offered, None)
 }
 
-pub fn describe(rx: &ReceiverCfg, node: &str, node_pos: Option<(f64, f64)>) -> Receiver {
+pub fn describe(
+    rx: &ReceiverCfg,
+    node: &str,
+    node_pos: Option<(f64, f64)>,
+    served: &Served,
+) -> Receiver {
     let (lat, lon, location) = position(rx, node_pos);
-    let (url, profiles, withheld) = rf_offer(rx);
+    let (url, profiles, withheld) = rf_offer(rx, served);
     Receiver {
         name: rx.name.clone(),
         node: node.to_string(),
@@ -466,12 +502,23 @@ pub mod tests {
         p
     }
 
+    /// What the instance running `settings` says it serves.
+    fn serving(settings: &Value) -> Served {
+        crate::owrx::status_profiles(&crate::owrx::tests::status_of(settings))
+            .map_err(|e| e.to_string())
+    }
+
     #[test]
     fn web_link_is_withheld_until_every_rf_profile_is_amateur() {
         let dir = tempfile::tempdir().unwrap();
         let raw = crate::owrx::tests::sample();
         let p = write_settings(&dir, &raw);
-        let r = describe(&rx_cfg(true, Some(p)), "tst-cuesta", Some((35.33, -120.62)));
+        let r = describe(
+            &rx_cfg(true, Some(p)),
+            "tst-cuesta",
+            Some((35.33, -120.62)),
+            &serving(&raw),
+        );
         assert_eq!(r.url, None);
         assert!(
             r.withheld
@@ -486,7 +533,8 @@ pub mod tests {
 
         let (filtered, _) = crate::owrx::filtered(&raw, true).unwrap();
         let p = write_settings(&dir, &filtered);
-        let r = describe(&rx_cfg(true, Some(p)), "tst-cuesta", None);
+        let live = serving(&filtered);
+        let r = describe(&rx_cfg(true, Some(p)), "tst-cuesta", None, &live);
         assert_eq!(r.url.as_deref(), Some("http://tst-pi.local.mesh:8074/"));
         assert_eq!(r.withheld, None);
         assert_eq!(r.profiles.len(), 2);
@@ -495,19 +543,52 @@ pub mod tests {
         let mut open = filtered.clone();
         open["allow_center_freq_changes"] = json!(true);
         let p = write_settings(&dir, &open);
-        let r = describe(&rx_cfg(true, Some(p)), "tst-cuesta", None);
+        let r = describe(&rx_cfg(true, Some(p)), "tst-cuesta", None, &live);
         assert!(r.withheld.unwrap().contains("allow_center_freq_changes"));
 
         let r = describe(
             &rx_cfg(true, Some(dir.path().join("missing.json"))),
             "tst-cuesta",
             None,
+            &live,
         );
         assert!(r.withheld.unwrap().contains("could not be checked"));
         assert_eq!(
-            describe(&rx_cfg(false, None), "tst-cuesta", None).withheld,
+            describe(&rx_cfg(false, None), "tst-cuesta", None, &live).withheld,
             None
         );
+    }
+
+    #[test]
+    fn the_running_instance_has_to_serve_what_was_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = crate::owrx::tests::sample();
+        let (copy, _) = crate::owrx::filtered(&raw, true).unwrap();
+        let rx = rx_cfg(true, Some(write_settings(&dir, &copy)));
+        let ok = describe(&rx, "tst-cuesta", None, &serving(&copy));
+        assert!(ok.link().is_some(), "{:?}", ok.withheld);
+
+        // the file was cleaned, but the instance at the link still runs the full settings
+        let lan = describe(&rx, "tst-cuesta", None, &serving(&raw));
+        assert_eq!(lan.link(), None);
+        assert!(lan.profiles.is_empty());
+        let why = lan.withheld.unwrap();
+        assert!(
+            why.starts_with("the running instance serves profile"),
+            "{why}"
+        );
+
+        // in the band, but not what was checked: another settings file, or no restart
+        let mut other = copy.clone();
+        other["sdrs"]["rtlsdr"]["profiles"]["70cm"]["center_freq"] = json!(432_100_000);
+        let why = describe(&rx, "tst-cuesta", None, &serving(&other))
+            .withheld
+            .unwrap();
+        assert!(why.contains("\"70cm\", which isn't in"), "{why}");
+
+        let down = describe(&rx, "tst-cuesta", None, &Err("could not connect".into()));
+        assert_eq!(down.link(), None);
+        assert!(down.withheld.unwrap().contains("couldn't be asked"));
     }
 
     fn payload(name: &str) -> Value {

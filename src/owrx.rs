@@ -103,6 +103,40 @@ pub fn profiles(settings: &Value) -> Result<Vec<Profile>> {
     Ok(out)
 }
 
+/// What a running instance says it serves, from its `/status.json`: `sdrs` lists every
+/// enabled device that hasn't failed, each with `profiles` of `name`, `center_freq` and
+/// `sample_rate` (owrx/controllers/status.py). It has no profile ids.
+pub fn status_profiles(status: &Value) -> Result<Vec<Profile>> {
+    let Some(Value::Array(devs)) = status.get("sdrs") else {
+        bail!("no \"sdrs\" list; is this OpenWebRX's status.json?");
+    };
+    let mut out = vec![];
+    for d in devs {
+        // anything shaped otherwise could hide a profile, so it withholds the link
+        let Some(Value::Array(profiles)) = d.get("profiles") else {
+            bail!("a device in \"sdrs\" has no \"profiles\" list");
+        };
+        let sdr = d.get("name").and_then(Value::as_str).unwrap_or("");
+        for p in profiles {
+            if !p.is_object() {
+                bail!("a profile of device {sdr:?} isn't an object");
+            }
+            out.push(Profile {
+                sdr: sdr.to_string(),
+                id: String::new(),
+                name: p
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                center: hz(p.get("center_freq")),
+                rate: hz(p.get("sample_rate")),
+            });
+        }
+    }
+    Ok(out)
+}
+
 pub fn load(path: &Path) -> Result<Value> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -156,6 +190,15 @@ pub fn report(settings: &Value) -> Result<String> {
                     "ok       {}/{} {:?}: {span}, {}",
                     p.sdr, p.id, p.name, b.name
                 );
+                if hz(settings["sdrs"][&p.sdr]["profiles"][&p.id].get("samp_rate")).is_none() {
+                    let _ = writeln!(
+                        s,
+                        "warning  {}/{} {:?}: no samp_rate of its own (it uses the device's); \
+                         OpenWebRX+'s status.json fails on such a profile, so the directory \
+                         withholds the web link until it has one",
+                        p.sdr, p.id, p.name
+                    );
+                }
             }
             (why, _) => {
                 bad += 1;
@@ -301,6 +344,80 @@ pub mod tests {
                 }
             }
         })
+    }
+
+    /// The status.json OpenWebRX+ serves for these settings: its StatusController lists
+    /// each device's profiles with the profile's own center_freq and samp_rate.
+    pub fn status_of(settings: &Value) -> Value {
+        let sdrs: Vec<Value> = settings["sdrs"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|d| {
+                let profiles: Vec<Value> = d["profiles"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .map(|p| {
+                        json!({"name": p["name"], "center_freq": p["center_freq"],
+                               "sample_rate": p["samp_rate"]})
+                    })
+                    .collect();
+                json!({"name": d["name"], "type": "RtlSdrSource", "profiles": profiles})
+            })
+            .collect();
+        json!({"receiver": {"name": "TST test receiver", "admin": "", "asl": 0, "location": ""},
+               "max_clients": 20, "version": "v1.2.88", "sdrs": sdrs})
+    }
+
+    #[test]
+    fn reads_what_a_running_instance_serves() {
+        let (copy, _) = filtered(&sample(), true).unwrap();
+        let live = status_profiles(&status_of(&copy)).unwrap();
+        assert_eq!(live.len(), 2);
+        let two = live.iter().find(|p| p.name == "2m").unwrap();
+        assert_eq!(two.span(), Some((144_000_000, 146_048_000)));
+        assert!(live.iter().all(|p| p.problem().is_none()));
+        let raw = status_profiles(&status_of(&sample())).unwrap();
+        let air = raw.iter().find(|p| p.name == "Airband").unwrap();
+        assert_eq!(air.center, Some(119_000_000), "numbers given as strings");
+        assert!(
+            air.problem().is_some(),
+            "no sample_rate of its own, so no span to check"
+        );
+        assert!(status_profiles(&json!({"version": "v1.2.88"})).is_err());
+    }
+
+    #[test]
+    fn a_status_json_of_another_shape_is_refused() {
+        for bad in [
+            json!({"sdrs": ["RTL-SDR"]}),
+            json!({"sdrs": [{"name": "RTL-SDR"}]}),
+            json!({"sdrs": [{"name": "RTL-SDR", "profiles": {"2m": {"name": "2m"}}}]}),
+            json!({"sdrs": [{"name": "RTL-SDR", "profiles": ["2m"]}]}),
+        ] {
+            assert!(status_profiles(&bad).is_err(), "{bad}");
+        }
+        let idle = json!({"sdrs": [{"name": "RTL-SDR", "profiles": []}]});
+        assert_eq!(status_profiles(&idle).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn report_warns_of_a_profile_without_its_own_rate() {
+        assert!(!report(&sample()).unwrap().contains("warning"));
+        let mut s = sample();
+        s["sdrs"]["rtlsdr"]["samp_rate"] = json!(2_400_000);
+        s["sdrs"]["rtlsdr"]["profiles"]["70cm"]
+            .as_object_mut()
+            .unwrap()
+            .remove("samp_rate");
+        let r = report(&s).unwrap();
+        assert!(r.contains("ok       rtlsdr/70cm"), "{r}");
+        assert!(
+            r.contains("warning  rtlsdr/70cm"),
+            "the running instance can't list it: {r}"
+        );
+        assert!(r.contains("1 of 4 profiles"), "still fine over RF: {r}");
     }
 
     #[test]

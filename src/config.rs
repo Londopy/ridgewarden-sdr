@@ -18,7 +18,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default = "d_listen")]
     pub listen: SocketAddr,
-    /// how often each receiver's live status is published
+    /// how often each receiver's live status is published, and how often its running
+    /// OpenWebRX+ instance is asked what it serves for the band check
     #[serde(default = "d_300")]
     pub status_interval_s: u64,
     #[serde(default)]
@@ -165,7 +166,8 @@ pub struct ReceiverCfg {
     pub lat: Option<f64>,
     #[serde(default)]
     pub lon: Option<f64>,
-    /// the mesh-facing OpenWebRX+ instance; published only if its settings pass the band check
+    /// the mesh-facing OpenWebRX+ instance; published only while its settings and what it
+    /// serves pass the band check
     #[serde(default)]
     pub openwebrx_url: Option<String>,
     /// that instance's settings.json
@@ -469,7 +471,7 @@ impl Config {
             if band_of(lo, hi).is_none() {
                 bail!(
                     "reference {:?}: its snippets cross the mesh as recordings, so it must be an \
-                     amateur transmitter (a club beacon or repeater), not NOAA or broadcast",
+                     amateur transmitter (a beacon or repeater), not NOAA Weather Radio or broadcast",
                     r.name
                 );
             }
@@ -571,7 +573,8 @@ impl Config {
 pub const EXAMPLE: &str = r#"# ridgewarden-sdr configuration
 data_dir = "/var/lib/ridgewarden-sdr"
 listen = "0.0.0.0:8798"
-# how often each receiver's live status (web UI answering, last capture) is published
+# how often each receiver's live status (web UI answering, last capture) is published, and
+# how often its running OpenWebRX+ instance is asked what it serves for the band check
 status_interval_s = 300
 
 [core]
@@ -605,7 +608,8 @@ form_allow = []
 # # lat = 35.33
 # # lon = -120.62
 # # the mesh-facing OpenWebRX+ instance (amateur profiles only) and its settings.json.
-# # The link is withheld from the directory if any profile there is outside the amateur bands.
+# # The link is withheld from the directory if any profile there is outside the amateur bands,
+# # or if the running instance's /status.json lists a profile that file doesn't have.
 # openwebrx_url = "http://tst-pi.local.mesh:8074/"
 # openwebrx_settings = "/var/lib/openwebrx-rf/settings.json"
 #
@@ -628,8 +632,9 @@ form_allow = []
 # # lon = -120.62
 
 # Reference transmitters for time differences: amateur transmitters at surveyed spots that
-# are on the air with modulation (a beacon sending data, a busy digipeater). The site asking
-# for a capture puts the reference's details in the request; other sites take them from there.
+# are on the air with modulation (a beacon sending data, a busy digipeater). Not NOAA Weather
+# Radio or broadcast: snippets are recordings, and they cross the mesh. The site asking for a
+# capture puts the reference's details in the request; other sites take them from there.
 # [[reference]]
 # name = "TST digipeater"
 # freq_mhz = 144.39
@@ -640,9 +645,11 @@ form_allow = []
 [tdoa]
 # fetch every site's snippets and work out the time differences; turn on at one or two sites
 solve = false
-# how far apart sites' recordings may start; keep clocks on NTP or GPS time
+# how far apart sites' recordings may start. NTP keeps clocks well inside this; the timing
+# itself comes from the reference transmitter, never from the clock
 max_skew_ms = 250
-# timing error of a clean measurement, microseconds; the weekly beacon test shows if it's right
+# timing error of a clean measurement, microseconds; the timing page under Accuracy shows
+# whether the weekly beacon tests agree
 sigma_us = 3.0
 
 [fix]

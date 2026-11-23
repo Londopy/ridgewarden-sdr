@@ -77,17 +77,11 @@ impl App {
             .collect();
         let db = open_db(&cfg.db_path(), PROJECTIONS)?;
         init_local(&db)?;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("ridgewarden-sdr/", env!("CARGO_PKG_VERSION")))
-            .build()?;
         Ok(Self {
             cfg,
             core,
             db: Mutex::new(db),
-            http,
+            http: http_client()?,
             who: Mutex::new(None),
             locks,
             posts: Mutex::new(HashMap::new()),
@@ -149,6 +143,16 @@ impl App {
         )?;
         Ok(())
     }
+}
+
+/// The client for the receivers' own web pages and APIs: no proxy, no redirects, 10 s.
+pub fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("ridgewarden-sdr/", env!("CARGO_PKG_VERSION")))
+        .build()?)
 }
 
 pub fn short_err(e: &anyhow::Error) -> String {
