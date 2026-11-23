@@ -4,6 +4,17 @@ All notable changes to ridgewarden-sdr are listed here. The format follows [Keep
 
 ## [Unreleased]
 
+### Added
+
+- A timing page under Accuracy: each beacon test's time differences, where the correlation peaked, plotted against the delays the surveyed spot gives, with each pair's stated 95% error, how many fall inside it, the mean error with its sign (a steady offset shows there), the error per test over time, and, once six tests are in, whether `tdoa.sigma_us` needs raising. Beacon results now keep the time differences they measured; only pairs between snippets published for the capture count.
+- The mesh-facing OpenWebRX+ instance is checked as it runs, through its `status.json`: its web link is withheld while it serves a profile outside the amateur bands or one its settings file doesn't have, and while it can't be asked.
+- `check-owrx` warns about a profile without a `samp_rate` of its own: OpenWebRX+'s `status.json` fails on it, which withholds the directory link.
+
+### Fixed
+
+- The message for a time difference refused as multipath had a run of stray spaces in it.
+- When the reference transmitter can't be lined up between two sites, the message now says one site's clock may be more than `tdoa.max_skew_ms` off, not only that the reference is unclear.
+
 ## [0.1.0] - 2026-11-20
 
 ### Added

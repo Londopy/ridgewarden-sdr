@@ -172,7 +172,7 @@ def main() -> None:
     compare = (f"https://github.com/{REPO}/compare/{prev}...{tag}" if prev
                else f"https://github.com/{REPO}/commits/{tag}")
 
-    body = f"""**ridgewarden-sdr** is a ridgewarden app. A signed directory of every receiver on the mesh, amateur-band profiles only over RF, and coordinated signal-strength captures across sites. It runs next to the [ridgewarden core](https://github.com/Londopy/ridgewarden). See the [README](https://github.com/{REPO}#readme).
+    body = f"""**ridgewarden-sdr** is a ridgewarden app. A signed directory of every receiver on the mesh that links only to OpenWebRX+ instances serving amateur bands alone, and coordinated signal-strength captures across sites. It runs next to the [ridgewarden core](https://github.com/Londopy/ridgewarden). See the [README](https://github.com/{REPO}#readme).
 
 ## What's new in {version}
 

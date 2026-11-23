@@ -1,7 +1,7 @@
 [package]
 name = "ridgewarden-sdr"
 version = "0.1.0"
-description = "SDR directory and coordinated signal-strength capture for AREDN meshes, with Part 97 band filtering"
+description = "SDR directory and coordinated signal-strength capture for AREDN meshes, with Part 97 band checks on what it links to and measures"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Londopy"]

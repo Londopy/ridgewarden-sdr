@@ -9,7 +9,7 @@
 
 **Find every SDR on the mesh, and use them together to find a transmitter.**
 
-A ridgewarden app for AREDN meshes. Each site describes its receivers in a config file and publishes them as signed events; every site builds the same directory and map from the log, so it works with the internet down. Only amateur-band OpenWebRX+ profiles are offered over RF.
+A ridgewarden app for AREDN meshes. Each site describes its receivers in a config file and publishes them as signed events; every site builds the same directory and map from the log, so it works with the internet down. The directory links only to OpenWebRX+ instances that serve amateur bands alone, checked in their settings file and in what the running instance reports.
 
 When something is interfering, one request makes every site measure the same frequency at the same moment. Any SDR gives signal strength, a KrakenSDR adds its bearing, and an RTL-SDR that can record IQ adds time differences of arrival, lined up on a reference transmitter. The page combines whatever came back into one fix with a 95% error ellipse. A weekly test against a beacon at a surveyed spot publishes how far the fixes really miss.
 
@@ -18,13 +18,13 @@ It needs a [ridgewarden](https://github.com/Londopy/ridgewarden) core running on
 ## What it does
 
 - **Directory and map.** Each `[[receiver]]` in `sdr.toml` is published as a signed `sdr.receiver` event: name, site, position (from the config or the node's own sysinfo), tuning range, antenna, the mesh-facing OpenWebRX+ link and the profiles it offers. It is published again whenever it changes and once a day. Every few minutes the site also logs `sdr.status` telemetry: whether the web UI answered, and when the receiver last measured something. The map is inline SVG drawn on the server, with other mesh nodes for context; there are no map tiles, so nothing comes from the internet. The top of the page counts receivers and sites heard in the last day.
-- **Part 97 band check.** Every profile of the mesh-facing OpenWebRX+ instance is checked against the US amateur bands. If any profile falls outside, or listeners may move the center frequency, the link is withheld from the directory and the page says why. Every site repeats the check on what other sites publish and hides a link that fails it.
+- **Part 97 band check.** Every profile of the mesh-facing OpenWebRX+ instance is checked against the US amateur bands, both in its `settings.json` and in the list the running instance serves at `/status.json`. If any profile falls outside, the running instance serves one the file doesn't have, its status can't be read, or listeners may move the center frequency, the link is withheld from the directory and the page says why. Every site repeats the band check on what other sites publish and hides a link that fails it.
 - **`check-owrx`** reads OpenWebRX+'s `settings.json`, reports which profiles fall outside the amateur bands, and can write an amateur-only copy for a mesh-facing instance.
 - **Captures.** "Measure 146.52 MHz, 16 kHz wide, for 10 seconds at 18:00" goes out as a signed `sdr.capture` event, from the command line or a form on the page. Sites pick it up a few seconds early and start together. Each receiver that covers it logs an `sdr.reading`: level, noise floor, peak, gain and calibration. The page ranks the sites, loudest first, and maps them.
 - **KrakenSDR bearings.** A site with a KrakenSDR reads its bearings during the capture and logs the average as `sdr.bearing`, with its spread.
 - **Time differences of arrival.** If the request names a reference transmitter, receivers with an `iq_command` record 2 s of IQ with `rtl_sdr` and share a cut-down snippet through the core's blob store. A site with `tdoa.solve` fetches the snippets, lines the clocks up on the reference, and logs the time differences as `sdr.tdoa`.
 - **One fix.** Every site combines the signal strengths, bearings and time differences for a capture into one position with a 95% error ellipse, on the map with the bearing lines. It says when the fix is outside the ring of receivers, when another spot fits as well, when nothing cross-checks it, and when the measurements disagree with each other. A fix with an ellipse under 1 km is marked as narrowed to a neighborhood.
-- **Weekly accuracy test.** One site asks every week for a capture of a beacon whose position was surveyed, and publishes the miss distance as a signed `sdr.beacon` event. The accuracy page charts every result, shows how many misses fell inside their own ellipse, and compares the last four tests with the four before.
+- **Weekly accuracy test.** One site asks every week for a capture of a beacon whose position was surveyed, and publishes the miss distance as a signed `sdr.beacon` event, with the time differences the test measured. The accuracy page charts every result, shows how many misses fell inside their own ellipse, and compares the last four tests with the four before. Its timing page plots each pair of receivers' time difference, where the correlation peaked, against the delay the surveyed spot gives, with each pair's stated 95% error, and says whether `tdoa.sigma_us` matches what the tests show.
 - `/api/receivers.geojson` and `/api/capture?id=` return the same data as JSON.
 
 ### How loud is "loud"
@@ -39,9 +39,9 @@ Raw levels, floors, gain and calibration are always shown next to the ranking. I
 
 ### How good is a fix
 
-Honestly: rough with signal strength alone, several degrees per KrakenSDR bearing (worse with multipath off ridges), and with RTL-SDRs lined up on a reference transmitter, 0.5 to 2 km inside the ring of receivers at best and much worse outside it. Better than that needs receivers with real 10 MHz and PPS inputs, which this version doesn't use.
+Honestly: rough with signal strength alone, and several degrees per KrakenSDR bearing (worse with multipath off ridges). With RTL-SDRs lined up on a reference transmitter, the spec's design target is 0.5 to 2 km inside the ring of receivers and much worse outside it, but no real hardware has measured that yet. Better than that needs receivers with real 10 MHz and PPS inputs, which this version doesn't use.
 
-The ellipse comes from the geometry and each measurement's stated error (`tdoa.sigma_us`, each KrakenSDR's `sigma_deg`, `fix.level_sigma_db`), widened when redundant measurements disagree by more than those errors allow. The weekly beacon test is the check: about 95% of its misses should land inside their ellipse. If they don't, raise the stated errors.
+The ellipse comes from the geometry and each measurement's stated error (`tdoa.sigma_us`, each KrakenSDR's `sigma_deg`, `fix.level_sigma_db`), widened when redundant measurements disagree by more than those errors allow. The weekly beacon test is the check: about 95% of its misses should land inside their ellipse. If they don't, raise the stated errors; the timing page says how far off `tdoa.sigma_us` is.
 
 Time differences need something to time. Data bursts, digital voice (DMR, P25, YSF, D-STAR) and key-ups correlate well; a plain carrier, or one carrying only a CTCSS tone, has nothing to correlate, and the page says so instead of showing a fix built on noise. A correlation peak has to stand 8 times the spread of the rest before a pair is used, and one that implies a path difference longer than the sites are apart is refused as multipath.
 
@@ -74,11 +74,11 @@ ridgewarden-sdr check-owrx /var/lib/openwebrx/settings.json \
 
 The copy drops profiles whose waterfall (`center_freq` plus and minus half of `samp_rate`) isn't wholly inside one amateur band, drops devices left with no profiles, and turns `allow_center_freq_changes` off at every level (OpenWebRX+ reads it per profile, per device and globally, and takes any true value). `--recenter` moves a profile that only spills over a band edge back inside it instead; OpenWebRX+'s own default 2 m profile (145 MHz, 2.048 MS/s) runs 24 kHz below 144 MHz and is moved to 145.024 MHz. 219-220 MHz is never offered: 97.303(l) keeps it to fixed point-to-point digital message forwarding. Each instance needs its own SDR, since only one program can hold a dongle. If the node's LAN is in direct mode, also block the LAN instance's port from mesh addresses on the Pi.
 
-This app doesn't proxy OpenWebRX+'s traffic; it links to the mesh-facing instance and checks its `settings.json` on every publish. Edit that file by hand and the link is withheld until it passes again.
+This app doesn't proxy OpenWebRX+'s traffic, so what it controls is the directory: it links to the mesh-facing instance only while its `settings.json` passes and the running instance's `/status.json` lists nothing else, checked every `status_interval_s`. Edit the file by hand, or point the link at an instance running other settings, and the link is withheld until both pass again. Keeping the LAN instance's port off the mesh is the Pi's firewall's job, not this app's. OpenWebRX+ can't build its `status.json` when a profile has no `samp_rate` of its own and drops the request, which withholds the link, so give each profile one, as OpenWebRX+'s own defaults do.
 
-**Signal-strength readings and bearings.** A site measures only frequencies whose whole requested band is inside an amateur band, unless its own `capture.local_bands` lists a non-amateur range it may measure. A reading is a handful of numbers (levels in dB, gain, position) and a bearing is one angle, never audio or a waterfall, so they are measurement data rather than a retransmitted signal. Still, they cross RF, so measuring outside the amateur bands is off by default; ask your club and the AREDN forum before turning it on. A site that may not measure a request logs a "refused" reading saying why. A request can only be made from a site that may measure it itself. Noise floor bins come only from spectrum the site may measure.
+**Signal-strength readings and bearings.** A site measures only frequencies whose whole requested band is inside an amateur band, unless its own `capture.local_bands` lists a non-amateur range it may measure. A reading is a handful of numbers (levels in dB, gain, position) and a bearing is one angle, never audio or a waterfall, so they are measurement data rather than a retransmitted signal. Still, they cross RF, so measuring outside the amateur bands is off by default; ask the people running your mesh and the AREDN forum before turning it on. A site that may not measure a request logs a "refused" reading saying why. A request can only be made from a site that may measure it itself. Noise floor bins come only from spectrum the site may measure.
 
-**IQ snippets.** A snippet is a recording, so both of its channels must be amateur: the target and the reference. That rules out the NOAA Weather Radio and ATSC references the spec mentions; a reference has to be an amateur transmitter at a surveyed spot, such as a club beacon sending data or a busy digipeater. A site records a snippet only when both channels, with 10 kHz either side for the channel filter's skirts, are inside amateur bands, whatever `local_bands` says, and otherwise measures signal strength only. Config validation refuses a non-amateur `[[reference]]`.
+**IQ snippets.** A snippet is a recording, so both of its channels must be amateur: the target and the reference. References are amateur transmitters at surveyed spots, such as a beacon sending data or a busy digipeater. NOAA Weather Radio and ATSC TV stations, which the spec sheet also suggested, are left out by design: their recordings can't cross amateur RF, and NOAA's 162.4 to 162.55 MHz is 14 MHz from the nearest amateur band, too far to share a 2 MHz recording with the target anyway. A site records a snippet only when both channels, with 10 kHz either side for the channel filter's skirts, are inside amateur bands, whatever `local_bands` says, and otherwise measures signal strength only. Config validation refuses a non-amateur `[[reference]]`.
 
 **The capture form key** crosses the mesh in the clear like everything else on amateur RF (no encryption under 97.113(a)(4)), so it keeps out casual misuse rather than a determined listener. Use `form_allow` to take form posts only from the site's LAN.
 
@@ -114,7 +114,7 @@ ridgewarden-sdr measure 144.6M 16k --secs 10 --at 10 --ref "TST digipeater" --no
 ridgewarden-sdr result 3f9c2a1b
 ```
 
-Leave a few minutes between asking and the start time. The core syncs every two minutes by default, and a site that gets the request more than a minute after its start time skips it rather than report a measurement from a different moment. Start times and the time-difference search rely on each site's clock being within `tdoa.max_skew_ms` (250 ms): a Pi without a real-time clock needs NTP or GPS time.
+Leave a few minutes between asking and the start time. The core syncs every two minutes by default, and a site that gets the request more than a minute after its start time skips it rather than report a measurement from a different moment. Clocks only start the recordings together and bound the time-difference search, so they need to agree within `tdoa.max_skew_ms` (250 ms), which NTP does easily; a Pi without a real-time clock needs it. The microsecond timing comes from the reference transmitter in each recording, never from a clock, so GPS time on the Pi wouldn't make fixes any better.
 
 The target and the reference share one 2 MHz recording, so they must be 100 kHz to 1.7 MHz apart, and each channel at most 40 kHz wide.
 
@@ -124,7 +124,7 @@ The target and the reference share one 2 MHz recording, so they must be 100 kHz 
 
 ```toml
 listen = "0.0.0.0:8798"
-status_interval_s = 300      # how often live status is published
+status_interval_s = 300      # how often live status is published and OpenWebRX+ is band-checked
 
 [core]
 url = "http://127.0.0.1:8790"
@@ -171,8 +171,8 @@ lon = -120.5981
 
 [tdoa]
 solve = false                # true at one or two sites
-max_skew_ms = 250
-sigma_us = 3.0               # timing error of a clean pair
+max_skew_ms = 250            # how far apart recordings may start; NTP keeps well inside it
+sigma_us = 3.0               # timing error of a clean pair; the timing page checks it
 
 [fix]
 path_loss_exp = 3.0          # 2 in free space, 3 to 4 over hills
@@ -218,13 +218,17 @@ gain_db = 30
 
 ## Limits
 
-- Real hardware hasn't been through it yet: rtl_power's and rtl_sdr's formats come from their source code and the stand-ins follow them, but no capture has been run on a real dongle, a real KrakenSDR or a real reference transmitter. The 0.5 to 2 km figure is the spec's realistic target, not a measured result; the weekly beacon test is how to measure it.
+- Not tested on real hardware yet: it has run against the simulated mesh on a PC, not on a Pi beside a real AREDN node; no capture has run on a real dongle, a real KrakenSDR or a real reference transmitter, and the status check hasn't met a real OpenWebRX+ instance. The formats of rtl_power, rtl_sdr, krakensdr_doa and OpenWebRX+'s `status.json` come from their source code, and the stand-ins and test fixtures follow them.
+- Time differences, fixes, the beacon test and its timing plot have only been run on simulated recordings and readings. The 0.5 to 2 km figure is the realistic target in [spec sheet 01](https://github.com/Londopy/ridgewarden/blob/main/docs/specs/01-sdr-network.md), not a measured result; the weekly beacon test is how to measure it.
 - Time differences use RTL-SDRs aligned on a reference, not GPS-disciplined receivers with 10 MHz and PPS inputs; the 500 m stretch target needs those and isn't attempted.
-- NOAA Weather Radio and ATSC stations can't be references here, because the snippets cross amateur RF (see Part 97 above).
-- Snippets travel as blobs through the core and use its rate limit and time window; a site can solve only once they have arrived.
+- NOAA Weather Radio and ATSC stations can't be references, by design (see Part 97 above).
+- Snippets travel as blobs through the core and use its rate limit and time window; a site can solve only once they have arrived, and a beacon test's result, worked out 20 minutes after the test, leaves out time differences that come later.
 - KrakenSDRs must be tuned by hand to the frequency being hunted; the app reads bearings and doesn't change krakensdr_doa's settings.
-- The live fox-hunt demo and a write-up with a university direction-finding group are not software and aren't part of this repo.
-- Waterfalls of non-amateur bands over the mesh stay off; whether they would be acceptable as measurement data is a question for the club and the AREDN forum, not something the app decides.
+- Which sites get an SDR (power, space, the site owner's permission) is for the people running the mesh to settle.
+- The spec's success measures (two sites listening, a real interference case narrowed to a neighborhood, the beacon miss shrinking) show on the pages, but only real sites can meet them.
+- The live fox-hunt demo is an event for the people running the mesh, not software.
+- A write-up and partnership with a university direction-finding group are outside this repo.
+- Waterfalls of non-amateur bands over the mesh stay off; whether they would be acceptable as measurement data is a question for the people running the mesh and the AREDN forum, not something the app decides.
 
 ## Building from source
 
